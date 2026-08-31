@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flick Score</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #eceae4;
+    font-family: 'Comic Sans MS', 'Segoe Print', cursive, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+  }
+  #hud {
+    position: fixed; top: 0; left: 0; right: 0;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 16px; z-index: 10;
+    color: #2b2b2b;
+    font-size: 18px;
+    font-weight: bold;
+  }
+  #newGameBtn {
+    background: #444; color: #fff; border: none;
+    padding: 8px 16px; border-radius: 20px; font-size: 14px;
+    cursor: pointer;
+  }
+  #banner {
+    position: fixed; top: 45%; left: 50%; transform: translate(-50%,-50%);
+    background: rgba(255,255,255,0.95); padding: 24px 32px; border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.2); text-align: center;
+    display: none; z-index: 20;
+  }
+  #banner button {
+    margin-top: 12px; background: #2f6fed; color: #fff; border: none;
+    padding: 10px 20px; border-radius: 20px; font-size: 16px; cursor: pointer;
+  }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div>SCORE <span id="score">0</span></div>
+  <div>BALLS <span id="balls">10</span></div>
+  <button id="newGameBtn">New Game</button>
+</div>
+<div id="banner">
+  <div id="bannerText">Round over!</div>
+  <button id="restartBtn">Play Again</button>
+</div>
+<canvas id="game"></canvas>
+
+<script>
+// Reference names/values pulled from Izzat's floor mockup layout
+const NAME_POOL = [
+  { name: "BRUNO", value: 8 },
+  { name: "HAALAND", value: 9 },
+  { name: "MALONE", value: 16 },
+  { name: "AHGRI", value: 3 },
+  { name: "BRORO", value: 18 },
+  { name: "SAKA", value: 11 },
+  { name: "ODEGAARD", value: 12 },
+  { name: "RASHFORD", value: 7 },
+  { name: "FODEN", value: 14 },
+  { name: "KANE", value: 20 },
+];
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const ballsEl = document.getElementById('balls');
+const banner = document.getElementById('banner');
+const bannerText = document.getElementById('bannerText');
+
+let W, H;
+/** Resize canvas to fill the viewport and re-derive layout-dependent constants. */
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+const FLOOR_TOP = 90;
+const FRICTION = 0.985;
+const BALL_RADIUS = 10;
+const TARGET_W = 70;
+const TARGET_H = 70;
+const START_BALLS = 10;
+
+let score = 0;
+let ballsLeft = START_BALLS;
+let targets = [];
+let ball = null; // active flying ball
+let ballStart = null; // resting position for next shot
+let dragging = false;
+let dragCurrent = null;
+let particles = [];
+
+/** Build a fresh scattered layout of point-value target cards, avoiding overlap and the ball's launch zone. */
+function spawnTargets() {
+  targets = [];
+  const pool = [...NAME_POOL];
+  const count = Math.min(7, pool.length);
+  let attempts = 0;
+  while (targets.length < count && attempts < 500) {
+    attempts++;
+    const idx = Math.floor(Math.random() * pool.length);
+    const candidate = pool[idx];
+    const x = TARGET_W/2 + Math.random() * (W - TARGET_W);
+    const y = FLOOR_TOP + TARGET_H/2 + Math.random() * (H * 0.55 - TARGET_H);
+    const overlaps = targets.some(t => Math.abs(t.x - x) < TARGET_W * 0.9 && Math.abs(t.y - y) < TARGET_H * 0.9);
+    if (overlaps) continue;
+    targets.push({ x, y, w: TARGET_W, h: TARGET_H, name: candidate.name, value: candidate.value, alive: true, wobble: 0 });
+    pool.splice(idx, 1);
+  }
+}
+
+/** Reset ball to its resting launch position at the bottom of the play field. */
+function resetBall() {
+  ballStart = { x: W / 2, y: H - 60 };
+  ball = { x: ballStart.x, y: ballStart.y, vx: 0, vy: 0, moving: false };
+}
+
+/** Start a brand new round: reset score, balls, targets, and ball position. */
+function newGame() {
+  score = 0;
+  ballsLeft = START_BALLS;
+  particles = [];
+  scoreEl.textContent = score;
+  ballsEl.textContent = ballsLeft;
+  banner.style.display = 'none';
+  spawnTargets();
+  resetBall();
+}
+
+document.getElementById('newGameBtn').addEventListener('click', newGame);
+document.getElementById('restartBtn').addEventListener('click', newGame);
+
+function pointerPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const p = e.touches ? e.touches[0] : e;
+  return { x: p.clientX - rect.left, y: p.clientY - rect.top };
+}
+
+canvas.addEventListener('mousedown', onDragStart);
+canvas.addEventListener('touchstart', onDragStart, { passive: false });
+window.addEventListener('mousemove', onDragMove);
+window.addEventListener('touchmove', onDragMove, { passive: false });
+window.addEventListener('mouseup', onDragEnd);
+window.addEventListener('touchend', onDragEnd);
+
+function onDragStart(e) {
+  if (ball.moving || ballsLeft <= 0) return;
+  const p = pointerPos(e);
+  const d = Math.hypot(p.x - ball.x, p.y - ball.y);
+  if (d < 60) {
+    dragging = true;
+    dragCurrent = p;
+    e.preventDefault();
+  }
+}
+
+function onDragMove(e) {
+  if (!dragging) return;
+  dragCurrent = pointerPos(e);
+  e.preventDefault();
+}
+
+const MAX_PULL = 140;
+const POWER_SCALE = 0.16;
+
+function onDragEnd() {
+  if (!dragging) return;
+  dragging = false;
+  const dx = ballStart.x - dragCurrent.x;
+  const dy = ballStart.y - dragCurrent.y;
+  let pullX = dx, pullY = dy;
+  const pullDist = Math.hypot(pullX, pullY);
+  if (pullDist < 8) { dragCurrent = null; return; }
+  const clamped = Math.min(pullDist, MAX_PULL);
+  const scale = clamped / pullDist;
+  pullX *= scale; pullY *= scale;
+
+  ball.vx = pullX * POWER_SCALE;
+  ball.vy = pullY * POWER_SCALE;
+  ball.moving = true;
+  ballsLeft--;
+  ballsEl.textContent = ballsLeft;
+  dragCurrent = null;
+}
+
+function checkCollisions() {
+  for (const t of targets) {
+    if (!t.alive) continue;
+    const halfW = t.w / 2, halfH = t.h / 2;
+    if (ball.x + BALL_RADIUS > t.x - halfW && ball.x - BALL_RADIUS < t.x + halfW &&
+        ball.y + BALL_RADIUS > t.y - halfH && ball.y - BALL_RADIUS < t.y + halfH) {
+      t.alive = false;
+      score += t.value;
+      scoreEl.textContent = score;
+      spawnParticles(t.x, t.y, t.value);
+      // knock the ball off at an angle so it doesn't just stop dead
+      ball.vx *= 0.6;
+      ball.vy *= -0.4;
+    }
+  }
+}
+
+function spawnParticles(x, y, value) {
+  particles.push({ x, y, life: 40, text: '+' + value });
+}
+
+function update() {
+  if (ball.moving) {
+    ball.x += ball.vx;
+    ball.y += ball.vy;
+    ball.vx *= FRICTION;
+    ball.vy *= FRICTION;
+
+    if (ball.x - BALL_RADIUS < 0) { ball.x = BALL_RADIUS; ball.vx *= -0.7; }
+    if (ball.x + BALL_RADIUS > W) { ball.x = W - BALL_RADIUS; ball.vx *= -0.7; }
+    if (ball.y - BALL_RADIUS < FLOOR_TOP) { ball.y = FLOOR_TOP + BALL_RADIUS; ball.vy *= -0.7; }
+    if (ball.y + BALL_RADIUS > H) { ball.y = H - BALL_RADIUS; ball.vy *= -0.7; }
+
+    checkCollisions();
+
+    const speed = Math.hypot(ball.vx, ball.vy);
+    if (speed < 0.15) {
+      ball.moving = false;
+      finishShotIfNeeded();
+    }
+  }
+
+  particles.forEach(p => p.life--);
+  particles = particles.filter(p => p.life > 0);
+}
+
+function finishShotIfNeeded() {
+  const anyAlive = targets.some(t => t.alive);
+  if (!anyAlive) {
+    bannerText.textContent = `All targets down! Final score: ${score}`;
+    banner.style.display = 'block';
+    return;
+  }
+  if (ballsLeft <= 0) {
+    bannerText.textContent = `Out of balls. Final score: ${score}`;
+    banner.style.display = 'block';
+    return;
+  }
+  resetBall();
+}
+
+function drawFloorLines() {
+  ctx.strokeStyle = 'rgba(0,0,0,0.08)';
+  ctx.lineWidth = 1;
+  for (let y = FLOOR_TOP; y < H; y += 32) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+  }
+}
+
+function drawTarget(t) {
+  if (!t.alive) return;
+  ctx.save();
+  ctx.translate(t.x, t.y);
+  ctx.fillStyle = '#d9d3c4';
+  ctx.strokeStyle = '#8a8371';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.rect(-t.w/2, -t.h/2, t.w, t.h);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#1c3fa8';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(t.name, 0, -8);
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillText(t.value, 0, 18);
+  ctx.restore();
+}
+
+function drawBall() {
+  ctx.beginPath();
+  ctx.arc(ball.x, ball.y, BALL_RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = '#f2f2f2';
+  ctx.fill();
+  ctx.strokeStyle = '#999';
+  ctx.stroke();
+}
+
+function drawAimLine() {
+  if (!dragging || !dragCurrent) return;
+  ctx.setLineDash([6, 6]);
+  ctx.strokeStyle = '#2f6fed';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(ball.x, ball.y);
+  const dx = ballStart.x - dragCurrent.x;
+  const dy = ballStart.y - dragCurrent.y;
+  ctx.lineTo(ball.x + dx, ball.y + dy);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawParticles() {
+  particles.forEach(p => {
+    ctx.globalAlpha = Math.max(0, p.life / 40);
+    ctx.fillStyle = '#1c8a3c';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(p.text, p.x, p.y - (40 - p.life));
+    ctx.globalAlpha = 1;
+  });
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawFloorLines();
+  targets.forEach(drawTarget);
+  drawAimLine();
+  drawBall();
+  drawParticles();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+newGame();
+loop();
+</script>
+</body>
+</html>
