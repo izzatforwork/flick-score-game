@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Flick Football — 7 v 7</title>
+<title>Flick Football — 11 v 11</title>
 <style>
   html, body {
     margin: 0; padding: 0; height: 100%;
@@ -21,13 +21,32 @@
     font-weight: bold;
   }
   .side-score { display: flex; align-items: center; gap: 6px; }
-  .side-score.active { color: #2f6fed; }
-  .turn-arrow { opacity: 0; }
-  .side-score.active .turn-arrow { opacity: 1; }
+  .side-score.p1 { color: #2f6fed; }
+  .side-score.p2 { color: #c0392b; }
   #newGameBtn {
     background: #444; color: #fff; border: none;
     padding: 8px 16px; border-radius: 20px; font-size: 14px;
     cursor: pointer;
+  }
+  #shotToggle {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 10; display: flex; gap: 8px; background: rgba(255,255,255,0.9);
+    padding: 6px; border-radius: 24px; box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+  }
+  #shotToggle button {
+    border: none; padding: 8px 18px; border-radius: 20px; font-size: 13px;
+    font-weight: bold; cursor: pointer; background: transparent; color: #666;
+  }
+  #shotToggle button.active { background: #2f6fed; color: #fff; }
+  #formationBar {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 10; display: flex; gap: 10px; align-items: center;
+    background: rgba(255,255,255,0.95); padding: 10px 16px; border-radius: 24px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+  }
+  #formationBar button {
+    border: none; padding: 10px 20px; border-radius: 20px; font-size: 14px;
+    font-weight: bold; cursor: pointer; background: #2f6fed; color: #fff;
   }
   #banner {
     position: fixed; top: 45%; left: 50%; transform: translate(-50%,-50%);
@@ -39,24 +58,23 @@
     margin-top: 12px; background: #2f6fed; color: #fff; border: none;
     padding: 10px 20px; border-radius: 20px; font-size: 16px; cursor: pointer;
   }
-  #goalFlash {
-    position: fixed; top: 30%; left: 50%; transform: translate(-50%,-50%);
-    font-size: 48px; font-weight: bold; color: #1c8a3c;
-    text-shadow: 0 2px 8px rgba(0,0,0,0.2);
-    opacity: 0; pointer-events: none; z-index: 15;
-    transition: opacity 0.15s;
-  }
-  #goalFlash.show { opacity: 1; }
   canvas { display: block; }
 </style>
 </head>
 <body>
 <div id="hud">
-  <div class="side-score" id="p2Row"><span class="turn-arrow">▶</span> P2 <span id="p2Goals">0</span></div>
+  <div class="side-score p2">P2 <span id="p2Goals">0</span></div>
   <button id="newGameBtn">New Game</button>
-  <div class="side-score" id="p1Row"><span class="turn-arrow">▶</span> P1 <span id="p1Goals">0</span></div>
+  <div class="side-score p1">P1 <span id="p1Goals">0</span></div>
 </div>
-<div id="goalFlash">GOAL!</div>
+<div id="formationBar">
+  <span id="formationText">P1: place your 11 players anywhere on the pitch</span>
+  <button id="formationDoneBtn">Done</button>
+</div>
+<div id="shotToggle">
+  <button id="groundBtn" class="active">GROUND</button>
+  <button id="lobBtn">LOB</button>
+</div>
 <div id="banner">
   <div id="bannerText">Match over!</div>
   <button id="restartBtn">Play Again</button>
@@ -64,31 +82,21 @@
 <canvas id="game"></canvas>
 
 <script>
-// Jersey numbers straight from Izzat's floor mockup — cosmetic labels only, no gameplay effect.
-const NAME_POOL = [
-  { name: "BRUNO", value: 8 },
-  { name: "HAALAND", value: 9 },
-  { name: "MALONE", value: 16 },
-  { name: "AHGRI", value: 3 },
-  { name: "BRORO", value: 18 },
-  { name: "SAKA", value: 11 },
-  { name: "ODEGAARD", value: 12 },
-  { name: "RASHFORD", value: 7 },
-  { name: "FODEN", value: 14 },
-  { name: "KANE", value: 20 },
-];
-const CARDS_PER_SIDE = 7;
-const MAX_TURNS_PER_SIDE = 7;
+const CARDS_PER_SIDE = 11;
+const GOAL_TARGET = 3;
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const p1GoalsEl = document.getElementById('p1Goals');
 const p2GoalsEl = document.getElementById('p2Goals');
-const p1Row = document.getElementById('p1Row');
-const p2Row = document.getElementById('p2Row');
 const banner = document.getElementById('banner');
 const bannerText = document.getElementById('bannerText');
-const goalFlash = document.getElementById('goalFlash');
+const formationBar = document.getElementById('formationBar');
+const formationText = document.getElementById('formationText');
+const formationDoneBtn = document.getElementById('formationDoneBtn');
+const shotToggle = document.getElementById('shotToggle');
+const groundBtn = document.getElementById('groundBtn');
+const lobBtn = document.getElementById('lobBtn');
 
 let W, H;
 /** Resize canvas to fill the viewport; layout constants below derive off W/H each frame. */
@@ -100,70 +108,83 @@ window.addEventListener('resize', resize);
 resize();
 
 const HUD_HEIGHT = 60;
+const FLOOR_BOTTOM_MARGIN = 60;
 const FRICTION = 0.985;
 const BALL_RADIUS = 10;
-const CARD_W = 56;
-const CARD_H = 56;
+const CARD_R = 26; // treat cards as circles for reflection math simplicity
 const MAX_PULL = 140;
 const POWER_SCALE = 0.16;
 const IMPULSE_TRANSFER = 0.9;
+const RESTITUTION = 0.75;
 const GOAL_W = 120;
 const GOAL_DEPTH = 26;
 const STOP_SPEED = 0.15;
+const LOB_MIN_AIRTIME = 20;  // frames
+const LOB_MAX_AIRTIME = 70;  // frames
 
 function midY() { return HUD_HEIGHT + (H - HUD_HEIGHT) / 2; }
 function goalRectTop() { return { x: W/2 - GOAL_W/2, y: HUD_HEIGHT, w: GOAL_W, h: GOAL_DEPTH }; }
 function goalRectBottom() { return { x: W/2 - GOAL_W/2, y: H - GOAL_DEPTH, w: GOAL_W, h: GOAL_DEPTH }; }
 
-let p1, p2, turn, ball, dragging, dragCard, dragCurrent, gameOver, particles, flickingCard;
+// game phase: 'formation-p1' | 'formation-p2' | 'match' | 'over'
+let phase, formationSide;
+let cards, ball, activeCard, gameOver, particles, shotType, finger;
 
-/** Scatter CARDS_PER_SIDE named player pieces inside a side's half, avoiding overlap with each other. */
-function spawnCardsFor(zoneTop, zoneBottom) {
-  const pool = [...NAME_POOL];
-  const list = [];
-  let attempts = 0;
-  while (list.length < CARDS_PER_SIDE && attempts < 500) {
-    attempts++;
-    const idx = Math.floor(Math.random() * pool.length);
-    const candidate = pool[idx];
-    const x = CARD_W/2 + Math.random() * (W - CARD_W);
-    const y = zoneTop + CARD_H/2 + Math.random() * (zoneBottom - zoneTop - CARD_H);
-    const overlaps = list.some(c => Math.abs(c.x - x) < CARD_W * 0.9 && Math.abs(c.y - y) < CARD_H * 0.9);
-    if (overlaps) continue;
-    list.push({ x, y, w: CARD_W, h: CARD_H, name: candidate.name, jersey: candidate.value, vx: 0, vy: 0, moving: false });
-    pool.splice(idx, 1);
+/** Reset all game state and start a fresh formation phase for P1. */
+function newGame() {
+  cards = [];
+  for (let side of ['p1', 'p2']) {
+    for (let i = 1; i <= CARDS_PER_SIDE; i++) {
+      cards.push({ side, jersey: i, x: null, y: null, r: CARD_R, vx: 0, vy: 0, moving: false, placed: false });
+    }
   }
-  return list;
+  p1GoalsEl.textContent = 0;
+  p2GoalsEl.textContent = 0;
+  gameOver = false;
+  particles = [];
+  shotType = 'ground';
+  finger = null;
+  activeCard = null;
+  banner.style.display = 'none';
+  resetBall();
+  phase = 'formation-p1';
+  formationSide = 'p1';
+  formationText.textContent = 'P1: place your 11 players anywhere on the pitch';
+  formationBar.style.display = 'flex';
+  shotToggle.style.display = 'none';
 }
 
 /** Put the ball back at centre field with zero velocity (kickoff / after a goal). */
 function resetBall() {
-  ball = { x: W / 2, y: midY(), vx: 0, vy: 0, moving: false };
-}
-
-/** Start a brand new 7-v-7 match: fresh card layouts both sides, goals/turns reset, ball at centre. */
-function newGame() {
-  const mid = midY();
-  p1 = { cards: spawnCardsFor(mid, H), goals: 0, turnsUsed: 0 };
-  p2 = { cards: spawnCardsFor(HUD_HEIGHT, mid), goals: 0, turnsUsed: 0 };
-  turn = 'p1';
-  gameOver = false;
-  particles = [];
-  flickingCard = null;
-  p1GoalsEl.textContent = p1.goals;
-  p2GoalsEl.textContent = p2.goals;
-  updateTurnIndicator();
-  banner.style.display = 'none';
-  resetBall();
-}
-
-function updateTurnIndicator() {
-  p1Row.classList.toggle('active', turn === 'p1');
-  p2Row.classList.toggle('active', turn === 'p2');
+  ball = { x: W / 2, y: midY(), vx: 0, vy: 0, moving: false, airborne: false, airtimeLeft: 0, lastTouchedBy: null };
 }
 
 document.getElementById('newGameBtn').addEventListener('click', newGame);
 document.getElementById('restartBtn').addEventListener('click', newGame);
+groundBtn.addEventListener('click', () => setShotType('ground'));
+lobBtn.addEventListener('click', () => setShotType('lob'));
+function setShotType(t) {
+  shotType = t;
+  groundBtn.classList.toggle('active', t === 'ground');
+  lobBtn.classList.toggle('active', t === 'lob');
+}
+
+formationDoneBtn.addEventListener('click', () => {
+  if (phase === 'formation-p1') {
+    phase = 'formation-p2';
+    formationSide = 'p2';
+    formationText.textContent = 'P2: place your 11 players anywhere on the pitch';
+  } else if (phase === 'formation-p2') {
+    startMatch();
+  }
+});
+
+function startMatch() {
+  phase = 'match';
+  formationBar.style.display = 'none';
+  shotToggle.style.display = 'flex';
+  findActiveCard();
+}
 
 function pointerPos(e) {
   const rect = canvas.getBoundingClientRect();
@@ -178,33 +199,50 @@ window.addEventListener('touchmove', onDragMove, { passive: false });
 window.addEventListener('mouseup', onDragEnd);
 window.addEventListener('touchend', onDragEnd);
 
-function activeSide() { return turn === 'p1' ? p1 : p2; }
-function defendingSide() { return turn === 'p1' ? p2 : p1; }
+let dragging = false, dragCard = null, dragCurrent = null;
+let placingCard = null;
 
 function onDragStart(e) {
-  if (flickingCard || ball.moving || gameOver) return;
   const p = pointerPos(e);
-  const cards = activeSide().cards;
-  let nearest = null, nearestDist = Infinity;
-  for (const c of cards) {
-    const d = Math.hypot(p.x - c.x, p.y - c.y);
-    if (d < 45 && d < nearestDist) { nearest = c; nearestDist = d; }
+
+  if (phase === 'formation-p1' || phase === 'formation-p2') {
+    // pick nearest unplaced card belonging to the side currently setting up
+    const candidates = cards.filter(c => c.side === formationSide && !c.placed);
+    if (candidates.length === 0) return;
+    placingCard = candidates[0];
+    placingCard.x = p.x;
+    placingCard.y = p.y;
+    placingCard.placed = true;
+    e.preventDefault();
+    return;
   }
-  if (nearest) {
+
+  if (phase !== 'match' || gameOver) return;
+  if (!activeCard || activeCard.moving || ball.moving) return;
+  const d = Math.hypot(p.x - activeCard.x, p.y - activeCard.y);
+  if (d < 45) {
     dragging = true;
-    dragCard = nearest;
+    dragCard = activeCard;
     dragCurrent = p;
     e.preventDefault();
   }
 }
 
 function onDragMove(e) {
+  const p = pointerPos(e);
+  if (placingCard) {
+    placingCard.x = Math.max(20, Math.min(W - 20, p.x));
+    placingCard.y = Math.max(HUD_HEIGHT + 20, Math.min(H - 20, p.y));
+    e.preventDefault();
+    return;
+  }
   if (!dragging) return;
-  dragCurrent = pointerPos(e);
+  dragCurrent = p;
   e.preventDefault();
 }
 
 function onDragEnd() {
+  if (placingCard) { placingCard = null; return; }
   if (!dragging) return;
   dragging = false;
   const dx = dragCard.x - dragCurrent.x;
@@ -216,121 +254,175 @@ function onDragEnd() {
   const scale = clamped / pullDist;
   pullX *= scale; pullY *= scale;
 
+  spawnFinger(dragCard.x, dragCard.y, dragCard.x + pullX, dragCard.y + pullY);
+
   dragCard.vx = pullX * POWER_SCALE;
   dragCard.vy = pullY * POWER_SCALE;
   dragCard.moving = true;
-  flickingCard = dragCard;
+  dragCard._powerFraction = clamped / MAX_PULL;
   dragCard = null;
   dragCurrent = null;
 }
 
-function spawnParticles(x, y, text) {
-  particles.push({ x, y, life: 40, text });
+/** Doodle-style finger-flick glyph: a small circle that slides from pull-back point to release point, then fades. */
+function spawnFinger(fromX, fromY, toX, toY) {
+  finger = { fromX, fromY, toX, toY, t: 0 };
 }
 
-/** AABB(card) vs circle(ball) overlap — on contact, transfer a fraction of the card's velocity to the ball. */
-function checkCardBallCollision(card) {
-  const halfW = card.w / 2, halfH = card.h / 2;
-  if (ball.x + BALL_RADIUS > card.x - halfW && ball.x - BALL_RADIUS < card.x + halfW &&
-      ball.y + BALL_RADIUS > card.y - halfH && ball.y - BALL_RADIUS < card.y + halfH) {
-    ball.vx = card.vx * IMPULSE_TRANSFER;
-    ball.vy = card.vy * IMPULSE_TRANSFER;
-    ball.moving = true;
-    // nudge card off the ball so they don't stay locked together
-    card.vx *= 0.3;
-    card.vy *= 0.3;
+/** Nearest-of-22 to the ball becomes the only draggable card, regardless of side. */
+function findActiveCard() {
+  let nearest = null, nearestDist = Infinity;
+  for (const c of cards) {
+    const d = Math.hypot(c.x - ball.x, c.y - ball.y);
+    if (d < nearestDist) { nearest = c; nearestDist = d; }
   }
+  activeCard = nearest;
 }
 
 function inRect(x, y, r) {
   return x > r.x && x < r.x + r.w && y > r.y && y < r.y + r.h;
 }
 
-/** Ball entering the opponent's goal rect scores for whoever is currently attacking. */
-function checkGoal() {
-  if (!ball.moving) return;
-  const scoringTowardTop = turn === 'p1';
-  const rect = scoringTowardTop ? goalRectTop() : goalRectBottom();
-  if (inRect(ball.x, ball.y, rect)) {
-    const scorer = activeSide();
-    scorer.goals++;
-    (turn === 'p1' ? p1GoalsEl : p2GoalsEl).textContent = scorer.goals;
-    spawnParticles(ball.x, ball.y, 'GOAL');
-    flashGoal();
-    ball.moving = false;
-    ball.vx = 0; ball.vy = 0;
-    finishTurn(true);
+/** Mirror-reflect a velocity vector off a collision normal, with a restitution energy loss. */
+function reflect(vx, vy, nx, ny) {
+  const dot = vx * nx + vy * ny;
+  return { vx: (vx - 2 * dot * nx) * RESTITUTION, vy: (vy - 2 * dot * ny) * RESTITUTION };
+}
+
+/** Check a moving circle body against all OTHER stationary cards; ball also transfers impulse on first contact. */
+function checkCardCollisions(body, bodyRadius, isBall, ownerCard) {
+  for (const c of cards) {
+    if (c === ownerCard) continue;
+    if (isBall && ball.airborne) continue; // lob ball skips all card collisions while airborne
+    const dx = body.x - c.x, dy = body.y - c.y;
+    const dist = Math.hypot(dx, dy);
+    const minDist = bodyRadius + c.r;
+    if (dist < minDist && dist > 0) {
+      const nx = dx / dist, ny = dy / dist;
+      if (isBall && !ball.moving) {
+        // ball was resting, now gets kicked by an incoming card (the active card's own first contact
+        // is handled separately in stepActiveCard(); this branch covers a *different* card grazing the ball)
+        continue;
+      }
+      const { vx, vy } = reflect(body.vx, body.vy, nx, ny);
+      body.vx = vx; body.vy = vy;
+      // push body out of overlap so it doesn't stick
+      const overlap = minDist - dist;
+      body.x += nx * overlap;
+      body.y += ny * overlap;
+      if (isBall) ball.lastTouchedBy = ball.lastTouchedBy; // unchanged: a bounce off a parked card isn't a "kick"
+    }
   }
 }
 
-function flashGoal() {
-  goalFlash.classList.add('show');
-  setTimeout(() => goalFlash.classList.remove('show'), 600);
+function stepBounds(body, r) {
+  if (body.x - r < 0) { body.x = r; body.vx *= -RESTITUTION; }
+  if (body.x + r > W) { body.x = W - r; body.vx *= -RESTITUTION; }
+  if (body.y - r < HUD_HEIGHT) { body.y = HUD_HEIGHT + r; body.vy *= -RESTITUTION; }
+  if (body.y + r > H) { body.y = H - r; body.vy *= -RESTITUTION; }
 }
 
-function stepBody(body, isBall) {
-  body.x += body.vx;
-  body.y += body.vy;
-  body.vx *= FRICTION;
-  body.vy *= FRICTION;
+function stepActiveCard() {
+  if (!activeCard.moving) return;
+  activeCard.x += activeCard.vx;
+  activeCard.y += activeCard.vy;
+  activeCard.vx *= FRICTION;
+  activeCard.vy *= FRICTION;
+  stepBounds(activeCard, CARD_R);
+  checkCardCollisions(activeCard, CARD_R, false, activeCard);
 
-  const r = isBall ? BALL_RADIUS : body.w / 2;
-  if (body.x - r < 0) { body.x = r; body.vx *= -0.7; }
-  if (body.x + r > W) { body.x = W - r; body.vx *= -0.7; }
-  if (body.y - r < HUD_HEIGHT) { body.y = HUD_HEIGHT + r; body.vy *= -0.7; }
-  if (body.y + r > H) { body.y = H - r; body.vy *= -0.7; }
+  // first contact with the ball: impulse transfer ("the kick"), only while ball isn't already moving away
+  const dx = ball.x - activeCard.x, dy = ball.y - activeCard.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist < CARD_R + BALL_RADIUS) {
+    ball.vx = activeCard.vx * IMPULSE_TRANSFER;
+    ball.vy = activeCard.vy * IMPULSE_TRANSFER;
+    ball.moving = true;
+    ball.lastTouchedBy = activeCard.side;
+    if (shotType === 'lob') {
+      ball.airborne = true;
+      ball.airtimeLeft = LOB_MIN_AIRTIME + (activeCard._powerFraction || 0.5) * (LOB_MAX_AIRTIME - LOB_MIN_AIRTIME);
+    }
+    // nudge card off the ball
+    activeCard.vx *= 0.3;
+    activeCard.vy *= 0.3;
+  }
+
+  if (Math.hypot(activeCard.vx, activeCard.vy) < STOP_SPEED) {
+    activeCard.moving = false;
+    activeCard.vx = 0; activeCard.vy = 0;
+  }
+}
+
+function stepBall() {
+  if (!ball.moving) return;
+  ball.x += ball.vx;
+  ball.y += ball.vy;
+  ball.vx *= FRICTION;
+  ball.vy *= FRICTION;
+  stepBounds(ball, BALL_RADIUS);
+
+  if (ball.airborne) {
+    ball.airtimeLeft--;
+    if (ball.airtimeLeft <= 0) ball.airborne = false;
+  } else {
+    checkCardCollisions(ball, BALL_RADIUS, true, null);
+  }
+
+  checkGoal();
+
+  if (ball.moving && Math.hypot(ball.vx, ball.vy) < STOP_SPEED) {
+    ball.moving = false;
+    ball.vx = 0; ball.vy = 0;
+  }
+}
+
+function checkGoal() {
+  if (!ball.moving) return;
+  const rect = ball.y < midY() ? goalRectTop() : goalRectBottom();
+  if (inRect(ball.x, ball.y, rect) && ball.lastTouchedBy) {
+    const scorer = ball.lastTouchedBy === 'p1' ? p1GoalsEl : p2GoalsEl;
+    const goals = parseInt(scorer.textContent, 10) + 1;
+    scorer.textContent = goals;
+    spawnParticles(ball.x, ball.y, 'GOAL!');
+    ball.moving = false;
+    resetBall();
+    if (goals >= GOAL_TARGET) {
+      endMatch(ball.lastTouchedBy === 'p1' ? 'P1' : 'P2');
+    } else {
+      findActiveCard();
+    }
+  }
+}
+
+function endMatch(winnerLabel) {
+  gameOver = true;
+  phase = 'over';
+  bannerText.textContent = `${winnerLabel} wins! (P1: ${p1GoalsEl.textContent} — P2: ${p2GoalsEl.textContent})`;
+  banner.style.display = 'block';
+}
+
+function spawnParticles(x, y, text) {
+  particles.push({ x, y, life: 40, text });
 }
 
 function update() {
-  if (gameOver) return;
+  if (phase !== 'match' || gameOver) return;
 
-  if (flickingCard && flickingCard.moving) {
-    stepBody(flickingCard, false);
-    checkCardBallCollision(flickingCard);
-    if (Math.hypot(flickingCard.vx, flickingCard.vy) < STOP_SPEED) {
-      flickingCard.moving = false;
-      flickingCard.vx = 0; flickingCard.vy = 0;
-    }
+  stepActiveCard();
+  stepBall();
+
+  if (!gameOver && activeCard && !activeCard.moving && !ball.moving) {
+    findActiveCard();
   }
 
-  if (ball.moving) {
-    stepBody(ball, true);
-    checkGoal();
-    if (ball.moving && Math.hypot(ball.vx, ball.vy) < STOP_SPEED) {
-      ball.moving = false;
-      ball.vx = 0; ball.vy = 0;
-    }
-  }
-
-  // turn ends once both bodies have settled (skip if a goal already ended it via finishTurn)
-  if (!gameOver && flickingCard && !flickingCard.moving && !ball.moving) {
-    finishTurn(false);
+  if (finger) {
+    finger.t += 0.08;
+    if (finger.t >= 1) finger = null;
   }
 
   particles.forEach(p => p.life--);
   particles = particles.filter(p => p.life > 0);
-}
-
-function finishTurn(wasGoal) {
-  const shooter = activeSide();
-  shooter.turnsUsed++;
-  flickingCard = null;
-
-  const turnsExhausted = p1.turnsUsed >= MAX_TURNS_PER_SIDE && p2.turnsUsed >= MAX_TURNS_PER_SIDE;
-
-  if (turnsExhausted) {
-    gameOver = true;
-    let winner;
-    if (p1.goals === p2.goals) winner = "It's a draw";
-    else winner = p1.goals > p2.goals ? "P1 wins!" : "P2 wins!";
-    bannerText.textContent = `${winner} (P1: ${p1.goals} — P2: ${p2.goals})`;
-    banner.style.display = 'block';
-    return;
-  }
-
-  turn = turn === 'p1' ? 'p2' : 'p1';
-  updateTurnIndicator();
-  resetBall();
 }
 
 function drawFloorLines() {
@@ -360,28 +452,37 @@ function drawGoals() {
   });
 }
 
-function drawCard(c, isActiveSide) {
+function drawCard(c) {
+  if (!c.placed && c !== placingCard) return;
+  if (c.x === null) return;
+  const isActive = c === activeCard && phase === 'match';
   ctx.save();
   ctx.translate(c.x, c.y);
-  ctx.fillStyle = isActiveSide ? '#eaf0ff' : '#d9d3c4';
-  ctx.strokeStyle = isActiveSide ? '#2f6fed' : '#8a8371';
-  ctx.lineWidth = isActiveSide ? 3 : 2;
   ctx.beginPath();
-  ctx.rect(-c.w/2, -c.h/2, c.w, c.h);
+  ctx.arc(0, 0, c.r, 0, Math.PI * 2);
+  ctx.fillStyle = c.side === 'p1' ? (isActive ? '#eaf0ff' : '#d9e4ff') : (isActive ? '#fdeceb' : '#f5d9d6');
+  ctx.strokeStyle = isActive ? '#f1a208' : (c.side === 'p1' ? '#2f6fed' : '#c0392b');
+  ctx.lineWidth = isActive ? 4 : 2;
   ctx.fill();
   ctx.stroke();
-  ctx.fillStyle = '#1c3fa8';
-  ctx.font = 'bold 10px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText(c.name, 0, -6);
+  ctx.fillStyle = c.side === 'p1' ? '#1c3fa8' : '#8a2318';
   ctx.font = 'bold 16px sans-serif';
-  ctx.fillText(c.jersey, 0, 14);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(c.jersey, 0, 1);
   ctx.restore();
 }
 
 function drawBall() {
+  const scale = ball.airborne ? 1.6 : 1;
+  if (ball.airborne) {
+    ctx.beginPath();
+    ctx.ellipse(ball.x, ball.y + BALL_RADIUS * 1.4, BALL_RADIUS * 0.9, BALL_RADIUS * 0.4, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.fill();
+  }
   ctx.beginPath();
-  ctx.arc(ball.x, ball.y, BALL_RADIUS, 0, Math.PI * 2);
+  ctx.arc(ball.x, ball.y, BALL_RADIUS * scale, 0, Math.PI * 2);
   ctx.fillStyle = '#f2f2f2';
   ctx.fill();
   ctx.strokeStyle = '#999';
@@ -402,11 +503,31 @@ function drawAimLine() {
   ctx.setLineDash([]);
 }
 
+/** Doodle-style flick: a small hand-drawn "finger" circle sliding along the flick vector, fading as it completes. */
+function drawFinger() {
+  if (!finger) return;
+  const t = Math.min(finger.t, 1);
+  const x = finger.fromX + (finger.toX - finger.fromX) * t;
+  const y = finger.fromY + (finger.toY - finger.fromY) * t;
+  ctx.globalAlpha = 1 - t;
+  ctx.beginPath();
+  ctx.arc(x, y, 9, 0, Math.PI * 2);
+  ctx.fillStyle = '#2b2b2b';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(finger.fromX, finger.fromY);
+  ctx.lineTo(x, y);
+  ctx.strokeStyle = '#2b2b2b';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
 function drawParticles() {
   particles.forEach(p => {
     ctx.globalAlpha = Math.max(0, p.life / 40);
     ctx.fillStyle = '#1c8a3c';
-    ctx.font = 'bold 18px sans-serif';
+    ctx.font = 'bold 20px sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(p.text, p.x, p.y - (40 - p.life));
     ctx.globalAlpha = 1;
@@ -417,11 +538,10 @@ function draw() {
   ctx.clearRect(0, 0, W, H);
   drawFloorLines();
   drawGoals();
-  const active = turn === 'p1' ? p1 : p2;
-  p1.cards.forEach(c => drawCard(c, active === p1));
-  p2.cards.forEach(c => drawCard(c, active === p2));
+  cards.forEach(drawCard);
   drawAimLine();
   drawBall();
+  drawFinger();
   drawParticles();
 }
 
