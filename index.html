@@ -68,8 +68,8 @@
   <div class="side-score p1">P1 <span id="p1Goals">0</span></div>
 </div>
 <div id="formationBar">
-  <span id="formationText">P1: place your 11 players anywhere on the pitch</span>
-  <button id="formationDoneBtn">Done</button>
+  <span id="formationText">P1: place your 7 players anywhere on the pitch</span>
+  <button id="formationDoneBtn">Kick Off</button>
 </div>
 <div id="shotToggle">
   <button id="groundBtn" class="active">GROUND</button>
@@ -82,7 +82,7 @@
 <canvas id="game"></canvas>
 
 <script>
-const CARDS_PER_SIDE = 11;
+const CARDS_PER_SIDE = 7;
 const GOAL_TARGET = 3;
 
 const canvas = document.getElementById('game');
@@ -111,7 +111,9 @@ const HUD_HEIGHT = 60;
 const FLOOR_BOTTOM_MARGIN = 60;
 const FRICTION = 0.985;
 const BALL_RADIUS = 10;
-const CARD_R = 26; // treat cards as circles for reflection math simplicity
+const CARD_W = 48; // box-shaped card (matches the physical paper card being jentik'd)
+const CARD_H = 48;
+const CARD_R = CARD_W / 2; // still used as the effective collision radius (circle approximation of the box)
 const MAX_PULL = 140;
 const POWER_SCALE = 0.16;
 const IMPULSE_TRANSFER = 0.9;
@@ -149,9 +151,27 @@ function newGame() {
   resetBall();
   phase = 'formation-p1';
   formationSide = 'p1';
-  formationText.textContent = 'P1: place your 11 players anywhere on the pitch';
+  formationText.textContent = `P1: place your ${CARDS_PER_SIDE} players anywhere on the pitch`;
   formationBar.style.display = 'flex';
   shotToggle.style.display = 'none';
+}
+
+/** CPU opponent: auto-scatter this side's unplaced cards inside their own half, avoiding overlap. */
+function autoPlaceCPU(side) {
+  const zoneTop = HUD_HEIGHT, zoneBottom = midY();
+  const unplaced = cards.filter(c => c.side === side && !c.placed);
+  for (const c of unplaced) {
+    let x, y, tries = 0;
+    do {
+      x = 40 + Math.random() * (W - 80);
+      y = zoneTop + 40 + Math.random() * (zoneBottom - zoneTop - 80);
+      tries++;
+    } while (
+      cards.some(o => o.placed && o !== c && Math.hypot(o.x - x, o.y - y) < CARD_W * 1.2) &&
+      tries < 200
+    );
+    c.x = x; c.y = y; c.placed = true;
+  }
 }
 
 /** Put the ball back at centre field with zero velocity (kickoff / after a goal). */
@@ -171,10 +191,7 @@ function setShotType(t) {
 
 formationDoneBtn.addEventListener('click', () => {
   if (phase === 'formation-p1') {
-    phase = 'formation-p2';
-    formationSide = 'p2';
-    formationText.textContent = 'P2: place your 11 players anywhere on the pitch';
-  } else if (phase === 'formation-p2') {
+    autoPlaceCPU('p2');
     startMatch();
   }
 });
@@ -205,7 +222,7 @@ let placingCard = null;
 function onDragStart(e) {
   const p = pointerPos(e);
 
-  if (phase === 'formation-p1' || phase === 'formation-p2') {
+  if (phase === 'formation-p1') {
     // pick nearest unplaced card belonging to the side currently setting up
     const candidates = cards.filter(c => c.side === formationSide && !c.placed);
     if (candidates.length === 0) return;
@@ -269,7 +286,8 @@ function spawnFinger(fromX, fromY, toX, toY) {
   finger = { fromX, fromY, toX, toY, t: 0 };
 }
 
-/** Nearest-of-22 to the ball becomes the only draggable card, regardless of side. */
+/** Nearest card to the ball (either side) becomes active, and teleports to sit right next to the ball — this is the
+ * "closest player runs over and takes the ball" step; only the currently-active card can ever move on its own. */
 function findActiveCard() {
   let nearest = null, nearestDist = Infinity;
   for (const c of cards) {
@@ -277,6 +295,20 @@ function findActiveCard() {
     if (d < nearestDist) { nearest = c; nearestDist = d; }
   }
   activeCard = nearest;
+  if (activeCard) teleportToPickupSpot(activeCard);
+}
+
+/** Snap the active card to a standoff position touching the ball, approaching from wherever it currently is. */
+function teleportToPickupSpot(card) {
+  let dx = card.x - ball.x, dy = card.y - ball.y;
+  let dist = Math.hypot(dx, dy);
+  if (dist < 0.001) { dx = 0; dy = -1; dist = 1; }
+  const standoff = BALL_RADIUS + CARD_R + 4;
+  card.x = ball.x + (dx / dist) * standoff;
+  card.y = ball.y + (dy / dist) * standoff;
+  card.x = Math.max(CARD_R, Math.min(W - CARD_R, card.x));
+  card.y = Math.max(HUD_HEIGHT + CARD_R, Math.min(H - CARD_R, card.y));
+  card.vx = 0; card.vy = 0; card.moving = false;
 }
 
 function inRect(x, y, r) {
@@ -331,21 +363,29 @@ function stepActiveCard() {
   stepBounds(activeCard, CARD_R);
   checkCardCollisions(activeCard, CARD_R, false, activeCard);
 
-  // first contact with the ball: impulse transfer ("the kick"), only while ball isn't already moving away
-  const dx = ball.x - activeCard.x, dy = ball.y - activeCard.y;
-  const dist = Math.hypot(dx, dy);
-  if (dist < CARD_R + BALL_RADIUS) {
-    ball.vx = activeCard.vx * IMPULSE_TRANSFER;
-    ball.vy = activeCard.vy * IMPULSE_TRANSFER;
-    ball.moving = true;
-    ball.lastTouchedBy = activeCard.side;
-    if (shotType === 'lob') {
-      ball.airborne = true;
-      ball.airtimeLeft = LOB_MIN_AIRTIME + (activeCard._powerFraction || 0.5) * (LOB_MAX_AIRTIME - LOB_MIN_AIRTIME);
+  // first contact with the ball: impulse transfer ("the kick") — fires exactly ONCE, only while the ball
+  // is still at rest. Without this guard the ball kept re-inheriting the card's (decaying) velocity every
+  // frame they stayed overlapped, which looked like the card "sticking" to the ball instead of kicking it away.
+  if (!ball.moving) {
+    const dx = ball.x - activeCard.x, dy = ball.y - activeCard.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < CARD_R + BALL_RADIUS) {
+      ball.vx = activeCard.vx * IMPULSE_TRANSFER;
+      ball.vy = activeCard.vy * IMPULSE_TRANSFER;
+      ball.moving = true;
+      ball.lastTouchedBy = activeCard.side;
+      if (shotType === 'lob') {
+        ball.airborne = true;
+        ball.airtimeLeft = LOB_MIN_AIRTIME + (activeCard._powerFraction || 0.5) * (LOB_MAX_AIRTIME - LOB_MIN_AIRTIME);
+      }
+      // separate them so they don't stay visually overlapped, and bleed off some of the card's own speed
+      const overlap = (CARD_R + BALL_RADIUS) - dist;
+      const nx = dist > 0 ? dx / dist : 0, ny = dist > 0 ? dy / dist : -1;
+      ball.x += nx * overlap;
+      ball.y += ny * overlap;
+      activeCard.vx *= 0.3;
+      activeCard.vy *= 0.3;
     }
-    // nudge card off the ball
-    activeCard.vx *= 0.3;
-    activeCard.vy *= 0.3;
   }
 
   if (Math.hypot(activeCard.vx, activeCard.vy) < STOP_SPEED) {
@@ -459,7 +499,7 @@ function drawCard(c) {
   ctx.save();
   ctx.translate(c.x, c.y);
   ctx.beginPath();
-  ctx.arc(0, 0, c.r, 0, Math.PI * 2);
+  ctx.rect(-CARD_W / 2, -CARD_H / 2, CARD_W, CARD_H);
   ctx.fillStyle = c.side === 'p1' ? (isActive ? '#eaf0ff' : '#d9e4ff') : (isActive ? '#fdeceb' : '#f5d9d6');
   ctx.strokeStyle = isActive ? '#f1a208' : (c.side === 'p1' ? '#2f6fed' : '#c0392b');
   ctx.lineWidth = isActive ? 4 : 2;
